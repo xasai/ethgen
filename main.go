@@ -19,7 +19,15 @@ import (
 
 const _PASSWORD_ENV_VAR = "ETHGEN_PASSWD"
 
-var decryptFlag = flag.String("d", "", "decrypt file")
+var (
+	decryptFlag = flag.String("d", "", "decrypt file")
+
+	caseInsensetive = flag.Bool("i", false, "case insesetive search")
+
+	suffixes = []string{
+		"dead",
+	}
+)
 
 func main() {
 	flag.Parse()
@@ -56,10 +64,7 @@ func main() {
 			continue
 		}
 
-		//publicKeyBytes := crypto.FromECDSAPub(publicKeyECDSA)
-
 		addr := crypto.PubkeyToAddress(*publicKeyECDSA)
-		//fmt.Println(addr.Hex())
 
 		if explain, nice := isNice(addr); nice {
 
@@ -81,17 +86,6 @@ func main() {
 			}
 		}
 	}
-}
-
-var hexspeak = []string{
-	"CAFEB0BA",
-	"FEE1DEAD",
-	"DEADBAAD",
-	"CAFEBABE",
-	"BEEFBABE",
-	"BAD22222",
-	"DEADBEEF",
-	"12345678",
 }
 
 func isNice(addr common.Address) (explain string, nice bool) {
@@ -121,23 +115,15 @@ func isNice(addr common.Address) (explain string, nice bool) {
 		return "0xAAAA..1234|0x1234...AAAA", true
 	}
 
-	addrStr := strings.ToUpper(addr.Hex()[2:])
+	addrStr := addr.Hex()[2:]
+	if *caseInsensetive {
+		addrStr = strings.ToLower(addrStr)
+	}
 
-	for _, word := range hexspeak {
-
-		if strings.HasPrefix(addrStr, word) ||
-			strings.HasSuffix(addrStr, word) {
-			return "speak", true
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(addrStr, suffix) {
+			return "suffix", true
 		}
-
-		if strings.HasPrefix(addrStr, word[:4]) ||
-			strings.HasPrefix(addrStr, word[4:]) ||
-			strings.HasPrefix(addrStr[:len(addr)-8], word[:4]) ||
-			strings.HasPrefix(addrStr[:len(addr)-8], word[4:]) {
-
-			return "speak_half", true
-		}
-
 	}
 
 	return "nothing found", false
@@ -146,7 +132,7 @@ func isNice(addr common.Address) (explain string, nice bool) {
 // checks whether chars in hex equal
 // like: 88 99 aa bb ... and so on
 func hexCharsEqual(b byte) bool {
-	return (b & 0b11110000) == (b & 0b00001111)
+	return (b&0b11110000)>>4 == (b & 0b00001111)
 }
 
 func encryptAES(key, data []byte) ([]byte, error) {
