@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -21,11 +23,14 @@ const _PASSWORD_ENV_VAR = "ETHGEN_PASSWD"
 
 var (
 	decryptFlag = flag.String("d", "", "decrypt file")
-
-	caseInsensetive = flag.Bool("i", false, "case insesetive search")
-
-	suffixes = []string{
-		"dead",
+	routines    = flag.Int("g", 20, "goroutines count")
+	endian      = []string{
+		"0000",
+	}
+	full = []string{
+		"0x0000_0000",
+		"",
+		"",
 	}
 )
 
@@ -42,7 +47,7 @@ func main() {
 	passwd := passwdHash[:]
 
 	if *decryptFlag != "" {
-		key, err := decryptAES(passwd, *decryptFlag)
+		key, err := decrypt(passwd, *decryptFlag)
 		if err != nil {
 			fmt.Printf("Error decrypting: %s", err.Error())
 			os.Exit(1)
@@ -51,82 +56,73 @@ func main() {
 		os.Exit(0)
 	}
 
-	for {
-		privateKey, err := crypto.GenerateKey()
-		if err != nil {
-			fmt.Println("GenerateKey error:", err.Error())
-		}
+	wg := sync.WaitGroup{}
+	wg.Add(*routines)
+	for i := 0; i < *routines; i++ {
+		go func() {
+			for {
+				privateKey, err := crypto.GenerateKey()
+				if err != nil {
+					fmt.Println("GenerateKey error:", err.Error())
+				}
+				publicKey := privateKey.Public()
+				publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+				if !ok {
+					fmt.Println("cannot assert type: publicKey is not of type *ecdsa.PublicKey")
+					continue
+				}
+				addr := crypto.PubkeyToAddress(*publicKeyECDSA)
 
-		publicKey := privateKey.Public()
-		publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
-		if !ok {
-			fmt.Println("cannot assert type: publicKey is not of type *ecdsa.PublicKey")
-			continue
-		}
+				if alias, nice := isPretty(addr); nice {
+					fmt.Println(addr, "-", alias)
+					encPrivateKey, err := encrypt(passwd, crypto.FromECDSA(privateKey))
+					if err != nil {
+						fmt.Println("encryptAES", err.Error())
+						continue
+					}
+					if err = os.MkdirAll(alias, os.ModeDir|0700); err != nil {
+						fmt.Println(alias, "os.Mkdir: ", err.Error())
+						continue
+					}
 
-		addr := crypto.PubkeyToAddress(*publicKeyECDSA)
-
-		if explain, nice := isNice(addr); nice {
-
-			fmt.Println(addr, ":", explain)
-
-			encPrivateKey, err := encryptAES(passwd, crypto.FromECDSA(privateKey))
-			if err != nil {
-				fmt.Println("encryptAES", err.Error())
-				continue
+					if err = os.WriteFile(filepath.Join(alias, addr.Hex()), encPrivateKey, 0400); err != nil {
+						fmt.Println("os.WriteFile", err.Error())
+						continue
+					}
+				}
 			}
-			if err = os.MkdirAll(explain, os.ModeDir|0700); err != nil {
-				fmt.Println("os.Mkdir", err.Error())
-				continue
-			}
-
-			if err = os.WriteFile(filepath.Join(explain, addr.Hex()), encPrivateKey, 0400); err != nil {
-				fmt.Println("os.WriteFile", err.Error())
-				continue
-			}
-		}
+		}()
 	}
+	wg.Wait()
 }
 
-func isNice(addr common.Address) (explain string, nice bool) {
-
+func isPretty(addr common.Address) (alias string, nice bool) {
 	var (
-		first   = addr[0]
-		second  = addr[1]
-		prelast = addr[len(addr)-2]
-		last    = addr[len(addr)-1]
+		begin = addr[:2]
+		end   = addr[len(addr)-2:]
 	)
 
-	if hexCharsEqual(first) &&
-		first == second &&
-		first == prelast &&
-		first == last {
+	if hexCharsEqual(begin[0]) && begin[0] == begin[1] && bytes.Equal(begin, end) {
 		return "0xAAAA..AAAA", true
 	}
 
-	if first == second &&
-		first == prelast &&
-		first == last {
-		return "0x1C1C..1C1C", true
-	}
-
-	if first == second && (hexCharsEqual(first) && hexCharsEqual(second)) ||
-		prelast == last && (hexCharsEqual(prelast) && hexCharsEqual(last)) {
-		return "0xAAAA..1234|0x1234...AAAA", true
-	}
-
-	addrStr := addr.Hex()[2:]
-	if *caseInsensetive {
-		addrStr = strings.ToLower(addrStr)
-	}
-
-	for _, suffix := range suffixes {
-		if strings.HasSuffix(addrStr, suffix) {
-			return "suffix", true
+	shortForm := trimAddr(addr)
+	for _, pattern := range full {
+		if shortForm == pattern {
+			return "full", true
 		}
 	}
 
 	return "nothing found", false
+}
+
+func trimAddr(addr common.Address) string {
+	// Convert the address to a string
+	// Trim the first and last 4 characters
+	hex := addr.Hex()
+	prefix := hex[:8]
+	suffix := hex[len(hex)-6:]
+	return strings.ToLower(prefix + "_" + suffix)
 }
 
 // checks whether chars in hex equal
@@ -135,29 +131,25 @@ func hexCharsEqual(b byte) bool {
 	return (b&0b11110000)>>4 == (b & 0b00001111)
 }
 
-func encryptAES(key, data []byte) ([]byte, error) {
+func encrypt(key, data []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, err
 	}
-
 	nonce := make([]byte, gcm.NonceSize())
 	_, err = io.ReadFull(rand.Reader, nonce)
 	if err != nil {
 		return nil, err
 	}
-
 	ciphertext := gcm.Seal(nonce, nonce, data, nil)
-
 	return ciphertext, nil
 }
 
-func decryptAES(key []byte, path string) ([]byte, error) {
+func decrypt(key []byte, path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
